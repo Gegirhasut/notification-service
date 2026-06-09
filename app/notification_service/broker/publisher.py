@@ -82,14 +82,21 @@ async def publish_receipt(
     outcome: str,
     provider_message_id: str | None,
     detail: str | None = None,
+    attempt: int = 0,
 ) -> None:
-    """Publish a provider delivery receipt (delivered | rejected | transient)."""
+    """Publish a provider delivery receipt (delivered | rejected | transient).
+
+    ``attempt`` carries a bounded redelivery counter (header ``x-receipt-attempt``)
+    so the receipts consumer can re-drive a transient apply-failure a fixed number
+    of times and then park it, instead of requeueing forever.
+    """
     msg = _message(
         {
             "notification_id": notification_id,
             "outcome": outcome,
             "provider_message_id": provider_message_id,
             "detail": detail,
-        }
+        },
+        headers={"x-receipt-attempt": attempt},
     )
     await exchange.publish(msg, routing_key=rabbit.ROUTING_RECEIPT)

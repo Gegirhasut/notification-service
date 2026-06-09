@@ -74,8 +74,12 @@ def make_handler(
                 return
 
             # 2. Rate limit BEFORE the CAS so the row stays 'queued' and can be
-            #    re-attempted from the 5s tier (never dropped).
-            if not await rate_limiter.allow(channel):
+            #    re-attempted from the 5s tier (never dropped). Transactional
+            #    traffic bypasses the limiter entirely: the assignment requires it
+            #    to dispatch "без задержек" (without delay), so it must never be
+            #    parked in a retry tier behind the rate window. Only marketing is
+            #    shaped.
+            if type_ != "transactional" and not await rate_limiter.allow(channel):
                 logger.info("rate limited on %s; requeue %s to 5s tier", channel, nid)
                 await publisher.publish_retry(
                     dlx, notification_id, type_, suffix="5s", retry_count=retry_count

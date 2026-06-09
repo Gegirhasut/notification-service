@@ -13,8 +13,10 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     ForeignKey,
+    Identity,
     Index,
     Integer,
     String,
@@ -101,7 +103,7 @@ class Notification(Base):
     events: Mapped[list[StatusEvent]] = relationship(
         back_populates="notification",
         cascade="all, delete-orphan",
-        order_by="StatusEvent.created_at",
+        order_by="StatusEvent.seq",
     )
 
     __table_args__ = (Index("ix_notifications_subscriber_created", "subscriber_id", "created_at"),)
@@ -111,6 +113,11 @@ class StatusEvent(Base):
     __tablename__ = "status_events"
 
     id: Mapped[uuid.UUID] = _uuid_col(primary_key=True, default=uuid.uuid4)
+    # Monotonic insertion sequence. created_at is the transaction timestamp, so
+    # rapid transitions (or all of a batch's 'queued' events) can share a value
+    # and order ambiguously. seq is a database-generated identity that strictly
+    # increases per insert, giving a deterministic total order for the history.
+    seq: Mapped[int] = mapped_column(BigInteger, Identity(always=False), nullable=False)
     notification_id: Mapped[uuid.UUID] = _uuid_col(
         ForeignKey("notifications.id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -121,3 +128,5 @@ class StatusEvent(Base):
     )
 
     notification: Mapped[Notification] = relationship(back_populates="events")
+
+    __table_args__ = (Index("ix_status_events_seq", "seq"),)

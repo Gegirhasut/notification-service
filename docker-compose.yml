@@ -1,0 +1,13 @@
+# Root-level Compose entrypoint.
+#
+# The whole project lives under app/, but the take-home expects the stack to come
+# up with a single command from the repository root. Compose v2.20+ `include`
+# pulls in app/docker-compose.yml (and resolves its build context, env, and
+# relative paths against app/), so:
+#
+#     docker compose up --build
+#
+# works from the repo root with no `cd app` and no duplicated service definitions.
+# Requires Docker Compose v2 (`docker compose`, not the legacy `docker-compose`).
+include:
+  - app/docker-compose.yml

@@ -25,6 +25,16 @@ router = APIRouter(prefix="/api/v1", tags=["notifications"])
     "/notifications",
     response_model=CreateNotificationResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        200: {
+            "model": CreateNotificationResponse,
+            "description": (
+                "Duplicate request: an `Idempotency-Key` matching an existing batch was "
+                "replayed. The original batch is returned unchanged (`duplicate: true`) and "
+                "nothing new is created."
+            ),
+        }
+    },
 )
 async def create_notifications(
     payload: CreateNotificationRequest,

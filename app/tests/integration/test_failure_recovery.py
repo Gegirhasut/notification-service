@@ -94,4 +94,56 @@ async def test_receipts_transient_fault_is_requeued_not_lost(harness_factory, mo
     nid = resp.json()["recipients"][0]["id"]
 
     assert await h.wait_for_status(nid, {"delivered"}, timeout=25) == "delivered"
-    assert state["calls"] >= 2  # failed once, requeued, then succeeded
+    assert state["calls"] >= 2  # failed once, re-driven, then succeeded
+
+
+async def test_malformed_receipt_is_parked_not_looped(harness_factory):
+    # A decodable receipt that can never be applied (no notification_id) is POISON:
+    # it must be dead-lettered to parking immediately, never requeued in a hot loop.
+    h = await harness_factory(mode="always_deliver", start_consumers=True)
+
+    await h.publish_raw_receipt({"outcome": "delivered", "detail": "no id here"})
+
+    async def _parked():
+        return await h.queue_message_count(rabbit.PARKING_QUEUE) >= 1
+
+    await h.wait_until(_parked, timeout=15)
+
+    # Reaching parking proves it did NOT loop (a requeue never dead-letters): the
+    # receipts queue is drained, not perpetually holding the poison message.
+    async def _receipts_drained():
+        return await h.queue_message_count(rabbit.RECEIPTS_QUEUE) == 0
+
+    await h.wait_until(_receipts_drained, timeout=10)
+
+
+async def test_receipt_transient_fault_is_bounded_then_parked(harness_factory, monkeypatch):
+    # A receipt apply-fault that NEVER recovers must not requeue forever: it is
+    # re-driven a bounded number of times (max_receipt_redeliveries) and then parked.
+    from notification_service.services import status as status_mod
+
+    h = await harness_factory(
+        mode="always_deliver", start_consumers=False, max_receipt_redeliveries=2
+    )
+    state = {"calls": 0}
+
+    async def always_fail_mark_delivered(session, nid, *, detail=None):
+        state["calls"] += 1
+        raise RuntimeError("permanent receipts db outage")
+
+    monkeypatch.setattr(status_mod, "mark_delivered", always_fail_mark_delivered)
+    await h.start_consumers()
+
+    resp = await _post(h.client, recipient_ids=["bounded-1"])
+    nid = resp.json()["recipients"][0]["id"]
+
+    # The undeliverable receipt ends up parked after the bounded re-drives.
+    async def _parked():
+        return await h.queue_message_count(rabbit.PARKING_QUEUE) >= 1
+
+    await h.wait_until(_parked, timeout=20)
+
+    # Bounded: attempt 1, attempt 2, then attempt 3 exceeds the cap and parks.
+    assert state["calls"] == 3
+    # The row never reached 'delivered' (the receipt could not be applied).
+    assert (await h.get_notification(nid)).status == "sent"

@@ -53,6 +53,11 @@ class Settings(BaseSettings):
 
     # --- Retry ---
     max_retries: int = 3
+    # Bounded redeliveries for the receipts consumer. A *transient* fault applying
+    # a receipt (e.g. a DB blip) is re-driven this many times before the receipt is
+    # parked, so a persistent failure can never hot-loop. Poison receipts (undecodable
+    # / unknown id / unknown outcome) are parked immediately and ignore this cap.
+    max_receipt_redeliveries: int = Field(default=5, ge=1)
     # Fixed-delay retry tier TTLs (milliseconds). Defaults match the tier names
     # 5s / 30s / 120s; tests shrink them so the retry cycle runs in milliseconds.
     retry_ttl_5s_ms: int = 5_000

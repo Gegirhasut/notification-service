@@ -19,16 +19,22 @@ single `docker compose up --build`.
 
 ## Quick start
 
-**Prerequisites:** Docker Engine + the Compose plugin. Nothing else is installed on the host.
+**Prerequisites:** Docker Engine + **Docker Compose v2** (`docker compose`, the plugin — *not* the
+legacy `docker-compose` v1 binary). Nothing else is installed on the host.
 
 ```bash
-# Optional — install Docker on a clean Ubuntu host (idempotent). Run from the repo root.
+# Optional — install Docker + the latest Compose plugin on a clean Ubuntu host (idempotent).
 ./app/scripts/bootstrap.sh
 
-# Bring up the whole stack (api, dispatcher, receipts, Postgres, RabbitMQ, Redis, migrate).
-cd app
+# Bring up the whole stack (api, dispatcher, receipts, sweeper, Postgres, RabbitMQ, Redis, migrate)
+# straight from the repo root — no `cd` needed.
 docker compose up --build
 ```
+
+The repo-root `docker-compose.yml` is a thin `include:` of [`app/docker-compose.yml`](app/docker-compose.yml)
+(Compose **v2.20+**), so the one command works from the root with no duplicated service definitions.
+Everything else (source, Dockerfile, migrations, tests) lives under `app/`; if you prefer, you can
+also `cd app && docker compose up --build`.
 
 A `.env` is optional — compose has sane local-dev defaults baked in (copy `.env.example`
 to `.env` to override). Only **two host ports are published**:
@@ -106,6 +112,23 @@ structural rules only. Invalid input → `422`.
 | delivered | доставлено |
 | rejected  | отброшено  |
 
+**Precise meaning of `sent`.** `sent` is set the moment the dispatcher *claims* the
+notification via the compare-and-set gate (`UPDATE … SET status='sent' WHERE … status='queued'`),
+and it transmits to the provider immediately afterwards. The CAS-before-transmit ordering is
+deliberate: it is what makes the provider call **at-most-once** (only the single caller that flips
+the row may call the gateway). The trade-off is a narrow window where a row reads `sent` before — or
+without — a successful transmit:
+
+- A **transient** provider failure reverts `sent → queued` and retries (the intentional flap below).
+- A **crash** between the CAS commit and a successful transmit leaves the row in `sent`; the
+  reconciler re-drives such rows after `SWEEPER_SENT_SECONDS` (default 120s), so the window is
+  bounded, not permanent.
+
+So `sent` reads as *"claimed for dispatch and being transmitted,"* not a hard guarantee that the
+gateway has already acknowledged receipt. A stricter reading of the spec could split this into an
+intermediate `sending` state (claimed) versus `sent` (gateway-accepted); we keep a single `sent`
+for simplicity and reconcile the crash window instead.
+
 ## Architecture
 
 One codebase, one image, three app processes (separate compose services, same image,
@@ -151,13 +174,18 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
   buffering defeats it. This is the mechanism by which transactional overtakes
   earlier-enqueued marketing.
 - **At-least-once (ack after commit).** Manual acks everywhere; a consumer acks only
-  **after** the handler's DB transaction commits. Nothing is ever silently discarded: an
-  *undecodable/poison* message is dead-lettered to `notifications.parking`; an *unexpected
-  runtime fault* (a DB/broker blip) is treated as transient and re-driven — the dispatcher
-  republishes it through the retry tiers (→ parking + `rejected` once `MAX_RETRIES` is
-  exhausted) and the receipts consumer requeues it. Both the work and receipts queues carry a
-  dead-letter route to parking as the backstop, so a `nack(requeue=False)` always lands in
-  parking, never in the void.
+  **after** the handler's DB transaction commits. Nothing is ever silently discarded:
+  - A **poison** message that can never be applied — an undecodable body on either queue,
+    or a structurally-invalid receipt (missing/non-UUID `notification_id`, unknown id,
+    unknown outcome) — is dead-lettered straight to `notifications.parking`, never requeued.
+  - An **unexpected transient fault** (a DB/broker blip) is re-driven a *bounded* number of
+    times, then parked. On the work queue the dispatcher republishes through the retry tiers
+    (→ parking + `rejected` once `MAX_RETRIES` is exhausted); on the receipts queue the consumer
+    republishes with an incremented attempt counter up to `MAX_RECEIPT_REDELIVERIES`, then parks.
+    Neither path can hot-loop.
+
+  Both the work and receipts queues carry a dead-letter route to parking as the backstop, so a
+  `nack(requeue=False)` always lands in parking, never in the void.
 - **Business exactly-once (CAS gate + provider idempotency key).** Before calling the
   provider, the dispatcher runs, inside a transaction,
   `UPDATE notifications SET status='sent', sent_at=now() WHERE id=:id AND status='queued'`.
@@ -166,6 +194,16 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
   retry window, the second guarantee is `notification.id` passed to the provider as its
   idempotency key — the provider mock deduplicates on it and emits at most one effective
   delivery per id, across any retries or concurrent duplicates.
+
+  > **⚠️ Single-dispatcher guarantee.** Business exactly-once as implemented holds for **one
+  > dispatcher process**, which is how the stack is deployed (the `dispatcher` compose service
+  > is single-instance — no `deploy.replicas`). The CAS gate is globally correct (Postgres
+  > serialises the row update), but the *mid-retry* backstop — the dedup that covers the window
+  > where a row is briefly back in `queued` — lives in the provider mock's **in-process memory**.
+  > Run two or more dispatchers and that window is no longer covered: two processes could each
+  > win the CAS on the same id across a `queued→sent→queued` retry and both call the gateway.
+  > **To scale the dispatcher horizontally you must rely on a real provider-side idempotency key**
+  > (keyed on `notification.id`, which we already pass) rather than the in-memory mock dedup.
 - **Retry / backoff.** Transient failures hop through fixed-TTL retry queues
   `retry.5s → retry.30s → retry.120s` (each dead-letters back to the work exchange). After
   `MAX_RETRIES` (default 3) the message goes to `notifications.parking` and the row becomes
@@ -196,6 +234,18 @@ how each gap is mitigated here:
   in-memory receipt task fires, that receipt is lost. **Mitigation:** the sweeper
   re-resolves rows stuck in `sent` (it re-drives them; the idempotent provider key
   re-emits the receipt).
+- **The reconciler can re-drive a genuinely slow in-flight send.** The sweeper reverts
+  rows stuck in `sent` for longer than `SWEEPER_SENT_SECONDS` (default 120s) back to
+  `queued` and republishes. If a *real* gateway legitimately takes longer than that to
+  accept/confirm, the reconciler will re-drive a send that was still in flight. Here the
+  CAS gate + the provider idempotency key (`notification.id`) keep that safe; against a
+  **real, non-idempotent gateway** it would be a double-send, so `SWEEPER_SENT_SECONDS`
+  must be tuned above the gateway's worst-case acceptance latency (and the provider call
+  made idempotent) before this is production-safe.
+- **Horizontal scaling of the dispatcher** is **not** supported as written — business
+  exactly-once depends on a single dispatcher process for the mid-retry window (see the
+  ⚠️ note under *Delivery semantics → Business exactly-once*). Scaling out requires a real
+  provider-side idempotency key.
 - **Publisher confirms** *are* on: aio-pika opens channels with
   `publisher_confirms=True`, so every `await exchange.publish(...)` waits for the
   broker to acknowledge the message. No change was needed here.

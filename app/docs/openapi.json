@@ -52,6 +52,16 @@
               }
             }
           },
+          "200": {
+            "description": "Duplicate request: an `Idempotency-Key` matching an existing batch was replayed. The original batch is returned unchanged (`duplicate: true`) and nothing new is created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateNotificationResponse"
+                }
+              }
+            }
+          },
           "422": {
             "description": "Validation Error",
             "content": {

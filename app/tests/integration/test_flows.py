@@ -331,17 +331,45 @@ async def test_get_unknown_notification_404(harness_factory):
 
 
 # 12. Rate limiter requeues (never drops) over the limit ------------------ #
-async def test_rate_limited_messages_are_requeued_not_dropped(harness_factory):
-    # SMS limit of 1/sec with 3 recipients: the dispatcher admits one per window
-    # and requeues the rest to the 5s tier. None are dropped — all three must
-    # still reach 'delivered', proving the rate-limit path requeues.
+async def test_rate_limited_marketing_is_requeued_not_dropped(harness_factory):
+    # MARKETING SMS limit of 1/sec with 3 recipients: the dispatcher admits one
+    # per window and requeues the rest to the 5s tier. None are dropped — all three
+    # must still reach 'delivered', proving the rate-limit path requeues. (Only
+    # marketing is shaped; transactional bypasses the limiter, see below.)
     h = await harness_factory(mode="always_deliver", rate_limit_sms_per_sec=1)
-    resp = await _post(h.client, recipient_ids=["r1", "r2", "r3"])
+    resp = await _post(h.client, type_="marketing", recipient_ids=["r1", "r2", "r3"])
     ids = [r["id"] for r in resp.json()["recipients"]]
 
     for nid in ids:
         assert await h.wait_for_status(nid, {"delivered"}, timeout=20) == "delivered"
     assert len(ids) == 3
+
+
+# 12b. Transactional bypasses the rate limiter ("без задержек") ------------ #
+async def test_transactional_bypasses_rate_limiter(harness_factory, monkeypatch):
+    # Transactional traffic must dispatch without delay, so the dispatcher must not
+    # even consult the rate limiter for it (no requeue into the 5s tier). Spy on
+    # rate_limiter.allow and assert it is never called, even with the limit at 1/sec.
+    from notification_service.services import rate_limiter
+
+    consulted: list[str] = []
+    real_allow = rate_limiter.allow
+
+    async def spy_allow(channel):
+        consulted.append(channel)
+        return await real_allow(channel)
+
+    monkeypatch.setattr(rate_limiter, "allow", spy_allow)
+
+    h = await harness_factory(mode="always_deliver", rate_limit_sms_per_sec=1)
+    resp = await _post(h.client, type_="transactional", recipient_ids=["t1", "t2", "t3"])
+    ids = [r["id"] for r in resp.json()["recipients"]]
+
+    for nid in ids:
+        assert await h.wait_for_status(nid, {"delivered"}, timeout=20) == "delivered"
+
+    # The limiter was never consulted for the transactional sends.
+    assert consulted == []
 
 
 # 13. Reconciler redrives a stranded 'queued' row ------------------------- #

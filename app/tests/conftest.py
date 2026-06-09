@@ -99,6 +99,7 @@ class Harness:
         rate_limit_sms_per_sec: int | None = None,
         rate_limit_email_per_sec: int | None = None,
         max_recipients: int | None = None,
+        max_receipt_redeliveries: int | None = None,
     ) -> None:
         from notification_service.config import ProviderMode
 
@@ -109,6 +110,7 @@ class Harness:
         self.rate_limit_sms_per_sec = rate_limit_sms_per_sec
         self.rate_limit_email_per_sec = rate_limit_email_per_sec
         self.max_recipients = max_recipients
+        self.max_receipt_redeliveries = max_receipt_redeliveries
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -126,6 +128,9 @@ class Harness:
         os.environ["RATE_LIMIT_EMAIL_PER_SEC"] = str(self.rate_limit_email_per_sec or 100_000)
         os.environ["MAX_RECIPIENTS"] = str(
             self.max_recipients if self.max_recipients is not None else 1000
+        )
+        os.environ["MAX_RECEIPT_REDELIVERIES"] = str(
+            self.max_receipt_redeliveries if self.max_receipt_redeliveries is not None else 5
         )
         get_settings.cache_clear()
         self.settings = get_settings()
@@ -193,6 +198,9 @@ class Harness:
                 )
             )
         )
+        receipts_on_failure = receipts_worker.make_failure_policy(
+            self.topology.exchange, self.settings
+        )
         self._tasks.append(
             asyncio.create_task(
                 consume(
@@ -200,7 +208,7 @@ class Harness:
                     receipts_queue,
                     receipts_worker.handle,
                     prefetch=16,
-                    on_failure=receipts_worker.on_failure,
+                    on_failure=receipts_on_failure,
                 )
             )
         )
@@ -261,6 +269,21 @@ class Harness:
 
         msg = aio_pika.Message(body=body, delivery_mode=aio_pika.DeliveryMode.PERSISTENT)
         await self.topology.exchange.publish(msg, routing_key=rabbit.ROUTING_WORK)
+
+    async def publish_raw_receipt(self, payload: dict) -> None:
+        """Publish an arbitrary (e.g. malformed) JSON receipt to the receipts queue."""
+        import json
+
+        import aio_pika
+
+        from notification_service.broker import rabbit
+
+        msg = aio_pika.Message(
+            body=json.dumps(payload).encode(),
+            content_type="application/json",
+            delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+        )
+        await self.topology.exchange.publish(msg, routing_key=rabbit.ROUTING_RECEIPT)
 
     async def get_notification(self, notification_id: str):
         from notification_service.db import repositories as repo

@@ -5,11 +5,18 @@ Consumes provider delivery receipts and performs the terminal transition
 transaction). Transitions are idempotent: a duplicate receipt finds the row no
 longer in 'sent', the CAS is a no-op, and the message is still acked.
 
-An *unexpected* fault here (e.g. a Postgres blip) must not drop the receipt or
-strand the row in 'sent', so the failure policy requeues for another attempt
-rather than discarding. A small pacing delay avoids a hot redelivery loop while
-the dependency recovers; the queue's dead-letter route to parking is the ultimate
-backstop.
+Two failure classes are handled distinctly, mirroring the work queue's poison
+handling so nothing can hot-loop or be silently dropped:
+
+- **Poison** (undecodable body, missing/invalid ``notification_id``, unknown id,
+  unknown outcome) can *never* be applied, so it is dead-lettered to parking
+  immediately — never requeued. Undecodable bodies are caught by the generic
+  consumer; the structural-validity checks here raise ``PoisonReceipt``.
+- **Transient** apply faults (e.g. a Postgres blip) must not drop the receipt or
+  strand the row in 'sent', so they are re-driven a *bounded* number of times
+  (``MAX_RECEIPT_REDELIVERIES``) by republishing with an incremented attempt
+  counter, then parked. A small pacing delay avoids a hot loop while the
+  dependency recovers.
 """
 
 from __future__ import annotations
@@ -20,11 +27,11 @@ import logging
 import signal
 import uuid
 
-from aio_pika.abc import AbstractIncomingMessage
+from aio_pika.abc import AbstractExchange, AbstractIncomingMessage
 
-from notification_service.broker import rabbit
+from notification_service.broker import publisher, rabbit
 from notification_service.broker.consumer import Disposition, consume
-from notification_service.config import get_settings
+from notification_service.config import Settings, get_settings
 from notification_service.db import repositories as repo
 from notification_service.db.session import session_scope
 from notification_service.services import status
@@ -35,17 +42,30 @@ _PREFETCH = 16
 _REQUEUE_BACKOFF_SECONDS = 0.5
 
 
+class PoisonReceipt(Exception):
+    """A receipt that can never be applied (bad shape / unknown id or outcome).
+
+    Distinct from a transient apply fault: poison is dead-lettered to parking
+    immediately rather than re-driven, so it cannot hot-loop the consumer.
+    """
+
+
 async def handle(payload: dict, message: AbstractIncomingMessage) -> None:
-    notification_id = payload["notification_id"]
-    nid = uuid.UUID(notification_id)
+    raw_id = payload.get("notification_id")
+    if not raw_id:
+        raise PoisonReceipt("receipt missing notification_id")
+    try:
+        nid = uuid.UUID(str(raw_id))
+    except (ValueError, TypeError) as exc:
+        raise PoisonReceipt(f"receipt notification_id is not a UUID: {raw_id!r}") from exc
+
     outcome = payload.get("outcome")
     detail = payload.get("detail")
 
     async with session_scope() as session:
         notification = await repo.get_notification(session, nid)
         if notification is None:
-            logger.warning("receipt for unknown notification %s; acking", nid)
-            return
+            raise PoisonReceipt(f"receipt for unknown notification {nid}")
 
         if outcome == "delivered":
             await status.mark_delivered(session, nid, detail=detail)
@@ -57,22 +77,62 @@ async def handle(payload: dict, message: AbstractIncomingMessage) -> None:
                 from_statuses=("sent",),
             )
         else:
-            logger.warning("unknown receipt outcome %r for %s; acking", outcome, nid)
-            return
+            raise PoisonReceipt(f"unknown receipt outcome {outcome!r} for {nid}")
 
         await session.commit()
 
 
-async def on_failure(
-    payload: dict, message: AbstractIncomingMessage, exc: Exception
-) -> Disposition:
-    """Transient fault applying a receipt: requeue so the receipt is not lost."""
-    logger.warning(
-        "receipt apply failed for %s; requeueing: %s", payload.get("notification_id"), exc
-    )
-    # Pace the redelivery so a persistent dependency outage doesn't hot-loop.
-    await asyncio.sleep(_REQUEUE_BACKOFF_SECONDS)
-    return Disposition.REQUEUE
+def make_failure_policy(exchange: AbstractExchange, settings: Settings):
+    """Failure policy for the receipts consumer.
+
+    Poison -> park immediately. Transient -> republish with an incremented
+    attempt counter (bounded by ``MAX_RECEIPT_REDELIVERIES``) and ack the
+    original; once the cap is exceeded, park. This bounds redelivery instead of
+    requeueing forever.
+    """
+
+    async def on_failure(
+        payload: dict, message: AbstractIncomingMessage, exc: Exception
+    ) -> Disposition:
+        notification_id = payload.get("notification_id")
+
+        # Poison: cannot ever be applied -> dead-letter to parking (never loop).
+        if isinstance(exc, PoisonReceipt):
+            logger.warning("poison receipt for %s; parking: %s", notification_id, exc)
+            return Disposition.PARK
+
+        headers = message.headers or {}
+        attempt = int(headers.get("x-receipt-attempt", 0)) + 1
+        if attempt > settings.max_receipt_redeliveries:
+            logger.warning(
+                "receipt for %s exceeded %s redeliveries; parking: %s",
+                notification_id,
+                settings.max_receipt_redeliveries,
+                exc,
+            )
+            return Disposition.PARK
+
+        # Transient: re-drive a bounded number of times. Republish with the bumped
+        # counter and ack the original; pace it so a dependency outage can't spin.
+        logger.warning(
+            "receipt apply failed for %s; re-driving (attempt %s/%s): %s",
+            notification_id,
+            attempt,
+            settings.max_receipt_redeliveries,
+            exc,
+        )
+        await asyncio.sleep(_REQUEUE_BACKOFF_SECONDS)
+        await publisher.publish_receipt(
+            exchange,
+            notification_id,
+            outcome=payload.get("outcome"),
+            provider_message_id=payload.get("provider_message_id"),
+            detail=payload.get("detail"),
+            attempt=attempt,
+        )
+        return Disposition.ACK
+
+    return on_failure
 
 
 async def run(stop: asyncio.Event | None = None) -> None:
@@ -81,7 +141,7 @@ async def run(stop: asyncio.Event | None = None) -> None:
 
     connection = await rabbit.connect()
     channel = await connection.channel()
-    await rabbit.declare_topology(channel)
+    topology = await rabbit.declare_topology(channel)
     receipts_queue = await rabbit.get_receipts_queue(channel)
 
     own_signals = stop is None
@@ -93,6 +153,7 @@ async def run(stop: asyncio.Event | None = None) -> None:
             with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, stop.set)
 
+    on_failure = make_failure_policy(topology.exchange, settings)
     logger.info("Receipts worker started; consuming %s", rabbit.RECEIPTS_QUEUE)
     consume_task = asyncio.create_task(
         consume(channel, receipts_queue, handle, prefetch=_PREFETCH, on_failure=on_failure)
