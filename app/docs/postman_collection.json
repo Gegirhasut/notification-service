@@ -1,120 +1,713 @@
 {
-  "info": {
-    "name": "Notification Service",
-    "description": "Mass SMS/Email dispatch microservice. Set the `base_url` collection variable (default http://localhost:8000).",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ "info": {
+  "name": "Notification Service",
+  "description": "Mass SMS/Email dispatch microservice. Set the `base_url` collection variable (default http://localhost:8000).",
+  "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+ },
+ "variable": [
+  {
+   "key": "base_url",
+   "value": "http://localhost:8000"
   },
-  "variable": [
-    { "key": "base_url", "value": "http://localhost:8000" },
-    { "key": "batch_id", "value": "" },
-    { "key": "notification_id", "value": "" },
-    { "key": "subscriber_id", "value": "alice" }
-  ],
-  "item": [
-    {
-      "name": "Health",
-      "request": {
-        "method": "GET",
-        "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
-      }
-    },
-    {
-      "name": "Create notifications (transactional SMS)",
-      "event": [
-        {
-          "listen": "test",
-          "script": {
-            "exec": [
-              "const body = pm.response.json();",
-              "pm.collectionVariables.set('batch_id', body.batch_id);",
-              "if (body.recipients && body.recipients.length) {",
-              "  pm.collectionVariables.set('notification_id', body.recipients[0].id);",
-              "  pm.collectionVariables.set('subscriber_id', body.recipients[0].subscriber_id);",
-              "}",
-              "pm.test('202 Accepted', () => pm.expect(pm.response.code).to.eql(202));"
-            ],
-            "type": "text/javascript"
-          }
-        }
-      ],
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Idempotency-Key", "value": "demo-key-001" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"Your code is 4821\",\n  \"recipient_ids\": [\"alice\", \"bob\", \"carol\"]\n}"
-        },
-        "url": {
-          "raw": "{{base_url}}/api/v1/notifications",
-          "host": ["{{base_url}}"],
-          "path": ["api", "v1", "notifications"]
-        }
-      }
-    },
-    {
-      "name": "Create notifications (duplicate key -> 200)",
-      "request": {
-        "method": "POST",
-        "header": [
-          { "key": "Content-Type", "value": "application/json" },
-          { "key": "Idempotency-Key", "value": "demo-key-001" }
-        ],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"Your code is 4821\",\n  \"recipient_ids\": [\"alice\", \"bob\", \"carol\"]\n}"
-        },
-        "url": {
-          "raw": "{{base_url}}/api/v1/notifications",
-          "host": ["{{base_url}}"],
-          "path": ["api", "v1", "notifications"]
-        }
-      }
-    },
-    {
-      "name": "Create notifications (marketing email)",
-      "request": {
-        "method": "POST",
-        "header": [{ "key": "Content-Type", "value": "application/json" }],
-        "body": {
-          "mode": "raw",
-          "raw": "{\n  \"channel\": \"email\",\n  \"type\": \"marketing\",\n  \"message\": \"Summer sale is live!\",\n  \"recipient_ids\": [\"alice\", \"dave\"]\n}"
-        },
-        "url": {
-          "raw": "{{base_url}}/api/v1/notifications",
-          "host": ["{{base_url}}"],
-          "path": ["api", "v1", "notifications"]
-        }
-      }
-    },
-    {
-      "name": "Get notification by id",
-      "request": {
-        "method": "GET",
-        "url": {
-          "raw": "{{base_url}}/api/v1/notifications/{{notification_id}}",
-          "host": ["{{base_url}}"],
-          "path": ["api", "v1", "notifications", "{{notification_id}}"]
-        }
-      }
-    },
-    {
-      "name": "List subscriber notifications (history)",
-      "request": {
-        "method": "GET",
-        "url": {
-          "raw": "{{base_url}}/api/v1/subscribers/{{subscriber_id}}/notifications?limit=50&offset=0",
-          "host": ["{{base_url}}"],
-          "path": ["api", "v1", "subscribers", "{{subscriber_id}}", "notifications"],
-          "query": [
-            { "key": "status", "value": "delivered", "disabled": true },
-            { "key": "limit", "value": "50" },
-            { "key": "offset", "value": "0" }
-          ]
-        }
-      }
+  {
+   "key": "batch_id",
+   "value": ""
+  },
+  {
+   "key": "notification_id",
+   "value": ""
+  },
+  {
+   "key": "subscriber_id",
+   "value": "alice"
+  }
+ ],
+ "item": [
+  {
+   "name": "Health",
+   "request": {
+    "method": "GET",
+    "url": {
+     "raw": "{{base_url}}/health",
+     "host": [
+      "{{base_url}}"
+     ],
+     "path": [
+      "health"
+     ]
     }
-  ]
+   }
+  },
+  {
+   "name": "Create notifications (transactional SMS)",
+   "event": [
+    {
+     "listen": "test",
+     "script": {
+      "exec": [
+       "const body = pm.response.json();",
+       "pm.collectionVariables.set('batch_id', body.batch_id);",
+       "if (body.recipients && body.recipients.length) {",
+       "  pm.collectionVariables.set('notification_id', body.recipients[0].id);",
+       "  pm.collectionVariables.set('subscriber_id', body.recipients[0].subscriber_id);",
+       "}",
+       "pm.test('202 Accepted', () => pm.expect(pm.response.code).to.eql(202));"
+      ],
+      "type": "text/javascript"
+     }
+    }
+   ],
+   "request": {
+    "method": "POST",
+    "header": [
+     {
+      "key": "Content-Type",
+      "value": "application/json"
+     },
+     {
+      "key": "Idempotency-Key",
+      "value": "demo-key-001"
+     }
+    ],
+    "body": {
+     "mode": "raw",
+     "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"Your code is 4821\",\n  \"recipient_ids\": [\"alice\", \"bob\", \"carol\"]\n}"
+    },
+    "url": {
+     "raw": "{{base_url}}/api/v1/notifications",
+     "host": [
+      "{{base_url}}"
+     ],
+     "path": [
+      "api",
+      "v1",
+      "notifications"
+     ]
+    }
+   }
+  },
+  {
+   "name": "Create notifications (duplicate key -> 200)",
+   "request": {
+    "method": "POST",
+    "header": [
+     {
+      "key": "Content-Type",
+      "value": "application/json"
+     },
+     {
+      "key": "Idempotency-Key",
+      "value": "demo-key-001"
+     }
+    ],
+    "body": {
+     "mode": "raw",
+     "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"Your code is 4821\",\n  \"recipient_ids\": [\"alice\", \"bob\", \"carol\"]\n}"
+    },
+    "url": {
+     "raw": "{{base_url}}/api/v1/notifications",
+     "host": [
+      "{{base_url}}"
+     ],
+     "path": [
+      "api",
+      "v1",
+      "notifications"
+     ]
+    }
+   }
+  },
+  {
+   "name": "Create notifications (marketing email)",
+   "request": {
+    "method": "POST",
+    "header": [
+     {
+      "key": "Content-Type",
+      "value": "application/json"
+     }
+    ],
+    "body": {
+     "mode": "raw",
+     "raw": "{\n  \"channel\": \"email\",\n  \"type\": \"marketing\",\n  \"message\": \"Summer sale is live!\",\n  \"recipient_ids\": [\"alice\", \"dave\"]\n}"
+    },
+    "url": {
+     "raw": "{{base_url}}/api/v1/notifications",
+     "host": [
+      "{{base_url}}"
+     ],
+     "path": [
+      "api",
+      "v1",
+      "notifications"
+     ]
+    }
+   }
+  },
+  {
+   "name": "Get notification by id",
+   "request": {
+    "method": "GET",
+    "url": {
+     "raw": "{{base_url}}/api/v1/notifications/{{notification_id}}",
+     "host": [
+      "{{base_url}}"
+     ],
+     "path": [
+      "api",
+      "v1",
+      "notifications",
+      "{{notification_id}}"
+     ]
+    }
+   }
+  },
+  {
+   "name": "List subscriber notifications (history)",
+   "request": {
+    "method": "GET",
+    "url": {
+     "raw": "{{base_url}}/api/v1/subscribers/{{subscriber_id}}/notifications?limit=50&offset=0",
+     "host": [
+      "{{base_url}}"
+     ],
+     "path": [
+      "api",
+      "v1",
+      "subscribers",
+      "{{subscriber_id}}",
+      "notifications"
+     ],
+     "query": [
+      {
+       "key": "status",
+       "value": "delivered",
+       "disabled": true
+      },
+      {
+       "key": "limit",
+       "value": "50"
+      },
+      {
+       "key": "offset",
+       "value": "0"
+      }
+     ]
+    }
+   }
+  },
+  {
+   "name": "Edge cases (validation)",
+   "description": "Structural validation failures (422) plus de-duplication and trimming behaviour for POST /api/v1/notifications.",
+   "item": [
+    {
+     "name": "Invalid channel -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"carrier\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"a\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Invalid type -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"promo\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"a\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Missing recipient_ids -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\"\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Empty message -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"\",\n  \"recipient_ids\": [\n    \"a\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Whitespace-only message -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"   \",\n  \"recipient_ids\": [\n    \"a\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Message too long (>1000) -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\n  \"recipient_ids\": [\n    \"a\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Empty recipient_ids -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": []\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Blank recipient entry -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"a\",\n    \"   \"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Recipient id too long (>128) -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Blank Idempotency-Key -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "Idempotency-Key",
+        "value": "   "
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"a\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Idempotency-Key too long (>255) -> 422",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('422 Unprocessable Entity', () => pm.expect(pm.response.code).to.eql(422));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       },
+       {
+        "key": "Idempotency-Key",
+        "value": "kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"a\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Duplicate recipient ids -> 202, deduplicated",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('202 Accepted', () => pm.expect(pm.response.code).to.eql(202));",
+         "const b = pm.response.json();",
+         "pm.test('total is unique count (2)', () => pm.expect(b.total).to.eql(2));",
+         "pm.test('two unique recipients', () => pm.expect(b.recipients.map(r => r.subscriber_id)).to.eql(['a', 'b']));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"a\",\n    \"a\",\n    \"b\"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    },
+    {
+     "name": "Whitespace-padded id -> 202, stored trimmed",
+     "event": [
+      {
+       "listen": "test",
+       "script": {
+        "exec": [
+         "pm.test('202 Accepted', () => pm.expect(pm.response.code).to.eql(202));",
+         "const b = pm.response.json();",
+         "pm.test('id is trimmed', () => pm.expect(b.recipients[0].subscriber_id).to.eql('spaced'));"
+        ],
+        "type": "text/javascript"
+       }
+      }
+     ],
+     "request": {
+      "method": "POST",
+      "header": [
+       {
+        "key": "Content-Type",
+        "value": "application/json"
+       }
+      ],
+      "body": {
+       "mode": "raw",
+       "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"hello\",\n  \"recipient_ids\": [\n    \"  spaced  \"\n  ]\n}"
+      },
+      "url": {
+       "raw": "{{base_url}}/api/v1/notifications",
+       "host": [
+        "{{base_url}}"
+       ],
+       "path": [
+        "api",
+        "v1",
+        "notifications"
+       ]
+      }
+     }
+    }
+   ]
+  }
+ ]
 }

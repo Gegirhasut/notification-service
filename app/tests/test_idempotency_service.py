@@ -17,13 +17,6 @@ async def test_claim_is_exclusive(db_session):
     assert await idempotency.claim("other") is True  # unrelated key independent
 
 
-async def test_release_allows_reclaim(db_session):
-    key = "release-me"
-    assert await idempotency.claim(key) is True
-    await idempotency.release(key)
-    assert await idempotency.claim(key) is True  # reclaimable after release
-
-
 async def test_claim_sets_ttl(db_session):
     key = "ttl-key"
     await idempotency.claim(key)

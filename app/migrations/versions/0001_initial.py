@@ -68,7 +68,6 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
-    op.create_index("ix_notifications_subscriber_id", "notifications", ["subscriber_id"])
     op.create_index("ix_notifications_status", "notifications", ["status"])
     op.create_index(
         "ix_notifications_subscriber_created",
@@ -102,6 +101,5 @@ def downgrade() -> None:
     op.drop_table("status_events")
     op.drop_index("ix_notifications_subscriber_created", table_name="notifications")
     op.drop_index("ix_notifications_status", table_name="notifications")
-    op.drop_index("ix_notifications_subscriber_id", table_name="notifications")
     op.drop_table("notifications")
     op.drop_table("batches")

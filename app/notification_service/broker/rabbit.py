@@ -78,11 +78,17 @@ async def declare_topology(channel: AbstractRobustChannel) -> Topology:
     dlx = await channel.declare_exchange(DLX, aio_pika.ExchangeType.DIRECT, durable=True)
 
     # Priority work queue. Priority ordering only holds with consumer prefetch=1
-    # (invariant 1); QoS is set on the dispatcher's channel, not here.
+    # (invariant 1); QoS is set on the dispatcher's channel, not here. A
+    # dead-letter route to parking is the backstop: a nack(requeue=False) on a
+    # poison/unrecoverable message lands in parking, never in the void.
     work_queue = await channel.declare_queue(
         WORK_QUEUE,
         durable=True,
-        arguments={"x-max-priority": MAX_PRIORITY},
+        arguments={
+            "x-max-priority": MAX_PRIORITY,
+            "x-dead-letter-exchange": DLX,
+            "x-dead-letter-routing-key": ROUTING_PARKING,
+        },
     )
     await work_queue.bind(exchange, routing_key=ROUTING_WORK)
 
@@ -105,18 +111,28 @@ async def declare_topology(channel: AbstractRobustChannel) -> Topology:
     parking_queue = await channel.declare_queue(PARKING_QUEUE, durable=True)
     await parking_queue.bind(dlx, routing_key=ROUTING_PARKING)
 
-    # Receipts queue for provider delivery receipts.
-    receipts_queue = await channel.declare_queue(RECEIPTS_QUEUE, durable=True)
+    # Receipts queue for provider delivery receipts. Same parking backstop: a
+    # receipt that can never be applied is dead-lettered, not dropped.
+    receipts_queue = await channel.declare_queue(
+        RECEIPTS_QUEUE,
+        durable=True,
+        arguments={
+            "x-dead-letter-exchange": DLX,
+            "x-dead-letter-routing-key": ROUTING_PARKING,
+        },
+    )
     await receipts_queue.bind(exchange, routing_key=ROUTING_RECEIPT)
 
     return Topology(exchange=exchange, dlx=dlx)
 
 
 async def get_work_queue(channel: AbstractRobustChannel) -> AbstractRobustQueue:
-    """Fetch the already-declared work queue (priority queue) for consuming."""
-    return await channel.declare_queue(
-        WORK_QUEUE, durable=True, arguments={"x-max-priority": MAX_PRIORITY}, passive=True
-    )
+    """Fetch the already-declared work queue (priority queue) for consuming.
+
+    Declared passively: the arguments are fixed by :func:`declare_topology`; a
+    passive declare only checks existence and never re-applies arguments.
+    """
+    return await channel.declare_queue(WORK_QUEUE, durable=True, passive=True)
 
 
 async def get_receipts_queue(channel: AbstractRobustChannel) -> AbstractRobustQueue:

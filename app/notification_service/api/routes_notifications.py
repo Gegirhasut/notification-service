@@ -33,6 +33,14 @@ async def create_notifications(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: AsyncSession = Depends(get_session),
 ) -> CreateNotificationResponse:
+    if idempotency_key is not None:
+        idempotency_key = idempotency_key.strip()
+        if not idempotency_key or len(idempotency_key) > 255:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Idempotency-Key must be non-blank and at most 255 characters",
+            )
+
     exchange = request.app.state.exchange
     result = await notification_service.create_and_dispatch(
         session,

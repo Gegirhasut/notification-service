@@ -42,3 +42,7 @@ class ProviderFactory:
             return self._instances[channel]
         except KeyError:
             raise ValueError(f"No provider for channel {channel!r}") from None
+
+    def providers(self) -> list[BaseMockProvider]:
+        """All provider instances (used to drain in-flight receipts on shutdown)."""
+        return list(self._instances.values())

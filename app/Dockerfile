@@ -40,11 +40,11 @@ USER appuser
 CMD ["uvicorn", "notification_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
 
 # --- Test stage --------------------------------------------------------------
-# Runs the integration suite. Intended to be launched with the host Docker socket
-# mounted and --network host so testcontainers can spawn ephemeral sibling
-# containers (Postgres/RabbitMQ/Redis) on the host. Runs as root for socket
-# access. Code is installed editable so the source can be bind-mounted for fast
-# iteration.
+# Runs the integration suite. Launched (see scripts/run-tests.sh) with the host
+# Docker socket mounted and host.docker.internal mapped to the host gateway, so
+# testcontainers can spawn ephemeral sibling containers (Postgres/RabbitMQ/Redis)
+# on the host and reach them on random ports. Code is installed editable so the
+# source can be bind-mounted for fast iteration.
 FROM python:3.12-slim AS test
 
 ENV PYTHONUNBUFFERED=1 \

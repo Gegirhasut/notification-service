@@ -54,14 +54,6 @@ async def claim(idempotency_key: str) -> bool:
         return True
 
 
-async def release(idempotency_key: str) -> None:
-    """Release a claim (used when batch creation fails after claiming)."""
-    try:
-        await get_redis().delete(redis_key(idempotency_key))
-    except redis.RedisError:
-        pass
-
-
 async def close() -> None:
     global _client
     if _client is not None:

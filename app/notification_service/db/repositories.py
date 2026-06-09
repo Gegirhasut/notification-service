@@ -7,8 +7,9 @@ boundary (so commit can be sequenced with broker acks).
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -96,6 +97,29 @@ async def get_notification(
         stmt = stmt.options(selectinload(Notification.events))
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
+
+
+async def list_stuck_notifications(
+    session: AsyncSession,
+    *,
+    status: str,
+    older_than_seconds: int,
+    limit: int,
+) -> list[Notification]:
+    """Rows in `status` whose last update is older than the threshold.
+
+    Used by the reconciler to find work that was stranded (e.g. a crash between
+    the DB commit and the publish, or a lost delivery receipt). The cutoff is
+    computed with the database clock (``now()``) to avoid client/server skew.
+    """
+    cutoff = func.now() - timedelta(seconds=older_than_seconds)
+    result = await session.execute(
+        select(Notification)
+        .where(Notification.status == status, Notification.updated_at <= cutoff)
+        .order_by(Notification.updated_at)
+        .limit(limit)
+    )
+    return list(result.scalars().all())
 
 
 async def list_notifications_for_subscriber(

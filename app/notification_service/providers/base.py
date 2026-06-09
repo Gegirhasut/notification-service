@@ -89,6 +89,9 @@ class BaseMockProvider(RecordingMixin):
         self._transient_attempts = transient_attempts
         self._attempts: dict[str, int] = {}
         self._results: dict[str, SendResult] = {}
+        # Receipt args cached per accepted id so a re-driven (reconciled) send can
+        # re-emit the receipt without counting as a new gateway acceptance.
+        self._receipt_args: dict[str, tuple[str, str, str | None]] = {}
         self._tasks: set[asyncio.Task] = set()
         # Effective sends per id: an accepted send that actually emitted a
         # receipt. Deduplication on the idempotency key (notification.id) keeps
@@ -120,12 +123,17 @@ class BaseMockProvider(RecordingMixin):
         self._record(notification_id, recipient, body)
 
         # Provider-key idempotency: an already-accepted id returns its cached
-        # result and does NOT emit another receipt. This is the exactly-once
-        # backstop for the window where the row is back in 'queued' mid-retry and
-        # the CAS gate alone can no longer block a concurrent duplicate. There is
-        # deliberately no `await` between this check and the cache write below, so
-        # two concurrent send() calls for one id cannot both reach acceptance.
+        # result and does NOT register a new effective send. This is the
+        # exactly-once backstop for the window where the row is back in 'queued'
+        # mid-retry and the CAS gate alone can no longer block a concurrent
+        # duplicate. There is deliberately no `await` between this check and the
+        # cache write below, so two concurrent send() calls for one id cannot both
+        # reach acceptance. We DO re-emit the (already-decided) receipt so a
+        # reconciler that re-drives a row stuck in 'sent' still gets it finalized.
         if notification_id in self._results:
+            receipt = self._receipt_args.get(notification_id)
+            if receipt is not None:
+                self._spawn_receipt(notification_id, *receipt)
             return self._results[notification_id]
 
         attempt = self._attempts.get(notification_id, 0) + 1
@@ -146,6 +154,7 @@ class BaseMockProvider(RecordingMixin):
 
         receipt_outcome = "delivered" if outcome == "deliver" else "rejected"
         detail = None if outcome == "deliver" else "rejected by gateway"
+        self._receipt_args[notification_id] = (provider_message_id, receipt_outcome, detail)
         self._spawn_receipt(notification_id, provider_message_id, receipt_outcome, detail)
         return result
 

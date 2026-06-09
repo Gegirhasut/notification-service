@@ -101,17 +101,24 @@ async def revert_sent_to_queued_for_retry(
     *,
     retry_count: int,
     last_error: str,
-) -> None:
-    """Compensate a transient provider failure: sent -> queued, bump retry_count.
+) -> bool:
+    """Compensate a transient failure: sent/queued -> queued, bump retry_count.
 
     The dispatcher flips queued -> sent *before* calling the provider (invariant
     2). When the provider then fails transiently we revert the row to 'queued' so
     the timed retry redelivery can win the CAS again and re-attempt the send. The
     retry attempt is recorded as a 'queued' status_event for the audit trail.
+
+    Guarded to ``sent``/``queued`` only (returns False otherwise) so the unexpected
+    -fault recovery path can call it without ever resurrecting a terminal
+    (delivered/rejected) row. Returns True iff a row was updated.
     """
-    await session.execute(
+    result = await session.execute(
         update(Notification)
-        .where(Notification.id == notification_id)
+        .where(
+            Notification.id == notification_id,
+            Notification.status.in_(("sent", "queued")),
+        )
         .values(
             status="queued",
             sent_at=None,
@@ -120,7 +127,10 @@ async def revert_sent_to_queued_for_retry(
             updated_at=_now(),
         )
     )
-    await _add_event(session, notification_id, "queued", f"retry {retry_count}: {last_error}")
+    updated = result.rowcount == 1
+    if updated:
+        await _add_event(session, notification_id, "queued", f"retry {retry_count}: {last_error}")
+    return updated
 
 
 async def set_provider_message_id(

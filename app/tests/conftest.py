@@ -96,6 +96,9 @@ class Harness:
         transient_attempts: int | None = None,
         max_retries: int | None = None,
         start_consumers: bool = True,
+        rate_limit_sms_per_sec: int | None = None,
+        rate_limit_email_per_sec: int | None = None,
+        max_recipients: int | None = None,
     ) -> None:
         from notification_service.config import ProviderMode
 
@@ -103,6 +106,9 @@ class Harness:
         self.transient_attempts = transient_attempts
         self.max_retries = max_retries
         self._start_consumers = start_consumers
+        self.rate_limit_sms_per_sec = rate_limit_sms_per_sec
+        self.rate_limit_email_per_sec = rate_limit_email_per_sec
+        self.max_recipients = max_recipients
         self._tasks: list[asyncio.Task] = []
 
     async def start(self) -> None:
@@ -113,9 +119,15 @@ class Harness:
         from notification_service.main import app
         from notification_service.providers.factory import ProviderFactory
 
-        if self.max_retries is not None:
-            os.environ["MAX_RETRIES"] = str(self.max_retries)
-            get_settings.cache_clear()
+        # Set every per-harness tunable explicitly (don't rely on leftover env
+        # from a previous harness) so tests are isolated, then refresh the cache.
+        os.environ["MAX_RETRIES"] = str(self.max_retries if self.max_retries is not None else 3)
+        os.environ["RATE_LIMIT_SMS_PER_SEC"] = str(self.rate_limit_sms_per_sec or 100_000)
+        os.environ["RATE_LIMIT_EMAIL_PER_SEC"] = str(self.rate_limit_email_per_sec or 100_000)
+        os.environ["MAX_RECIPIENTS"] = str(
+            self.max_recipients if self.max_recipients is not None else 1000
+        )
+        get_settings.cache_clear()
         self.settings = get_settings()
 
         await self._reset_state()
@@ -143,8 +155,10 @@ class Harness:
             transient_attempts=self.transient_attempts,
         )
 
-        # Wire the in-process API to the same broker exchange (skip lifespan).
+        # Wire the in-process API to the same broker exchange + connection (we
+        # skip the FastAPI lifespan, so set what /health reads ourselves).
         app.state.exchange = self.topology.exchange
+        app.state.broker_connection = self.connection
         self.app = app
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test"
@@ -157,16 +171,27 @@ class Harness:
         from notification_service.broker import rabbit
         from notification_service.broker.consumer import consume
         from notification_service.workers import receipts as receipts_worker
-        from notification_service.workers.dispatcher import make_handler
+        from notification_service.workers.dispatcher import make_failure_policy, make_handler
 
         work_queue = await rabbit.get_work_queue(self.consume_channel)
         receipts_queue = await rabbit.get_receipts_queue(self.receipts_channel)
 
+        # Wire the same recovery policies the production workers use, so tests
+        # exercise the real "never silently drop" behaviour (A1).
         handler = make_handler(
             self.topology.exchange, self.topology.dlx, self.factory, self.settings
         )
+        work_on_failure = make_failure_policy(self.topology.dlx, self.settings)
         self._tasks.append(
-            asyncio.create_task(consume(self.consume_channel, work_queue, handler, prefetch=1))
+            asyncio.create_task(
+                consume(
+                    self.consume_channel,
+                    work_queue,
+                    handler,
+                    prefetch=1,
+                    on_failure=work_on_failure,
+                )
+            )
         )
         self._tasks.append(
             asyncio.create_task(
@@ -175,6 +200,7 @@ class Harness:
                     receipts_queue,
                     receipts_worker.handle,
                     prefetch=16,
+                    on_failure=receipts_worker.on_failure,
                 )
             )
         )
@@ -227,6 +253,15 @@ class Harness:
 
         await publisher.publish_work(self.topology.exchange, notification_id, type_)
 
+    async def publish_raw_work(self, body: bytes) -> None:
+        """Publish an arbitrary (e.g. undecodable) body to the work queue."""
+        import aio_pika
+
+        from notification_service.broker import rabbit
+
+        msg = aio_pika.Message(body=body, delivery_mode=aio_pika.DeliveryMode.PERSISTENT)
+        await self.topology.exchange.publish(msg, routing_key=rabbit.ROUTING_WORK)
+
     async def get_notification(self, notification_id: str):
         from notification_service.db import repositories as repo
         from notification_service.db.session import session_scope
@@ -256,6 +291,21 @@ class Harness:
     async def queue_message_count(self, queue_name: str) -> int:
         queue = await self.publish_channel.declare_queue(queue_name, passive=True)
         return queue.declaration_result.message_count
+
+    async def wait_until(self, predicate, *, timeout: float = 15.0, interval: float = 0.05):
+        """Poll an async predicate until it returns truthy, or raise on timeout.
+
+        Used instead of fixed sleeps so tests wait on an actual observable
+        (queue depth, status, provider call count) rather than a guessed delay.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        last = None
+        while asyncio.get_event_loop().time() < deadline:
+            last = await predicate()
+            if last:
+                return last
+            await asyncio.sleep(interval)
+        raise AssertionError(f"condition not met within {timeout}s (last={last!r})")
 
 
 HarnessFactory = Callable[..., Awaitable[Harness]]

@@ -5,6 +5,8 @@ Each asserts DB state and/or provider calls against real infrastructure.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
 from notification_service.broker import rabbit
@@ -186,10 +188,13 @@ async def test_exactly_once_under_redelivery(harness_factory):
 
     await h.start_consumers()
     await h.wait_for_status(nid, {"delivered"})
-    # Let any second delivery be processed (and skipped) too.
-    import asyncio
 
-    await asyncio.sleep(0.5)
+    # Wait until BOTH work messages (original + duplicate) have drained, rather
+    # than guessing with a sleep — then the provider-call count is final.
+    async def _work_drained():
+        return await h.queue_message_count(rabbit.WORK_QUEUE) == 0
+
+    await h.wait_until(_work_drained)
 
     calls = [c for c in h.factory.for_channel("sms").calls if c.notification_id == nid]
     assert len(calls) == 1  # CAS gate => provider.send invoked exactly once
@@ -213,9 +218,14 @@ async def test_exactly_once_duplicate_during_retry(harness_factory):
     await h.start_consumers()
     await h.wait_for_status(nid, {"delivered"}, timeout=20)
 
-    import asyncio
+    # Wait until the timed retry copy has cycled back through the 5s tier and the
+    # work queue (so it was processed and skipped) — no bare sleep.
+    async def _retry_drained():
+        work = await h.queue_message_count(rabbit.WORK_QUEUE)
+        retry5s = await h.queue_message_count(rabbit.retry_queue_name("5s"))
+        return work == 0 and retry5s == 0
 
-    await asyncio.sleep(0.5)  # let the timed retry come back and be skipped
+    await h.wait_until(_retry_drained, timeout=20)
 
     provider = h.factory.for_channel("sms")
     # send() may be invoked several times (transient attempt, the duplicate, the
@@ -260,11 +270,11 @@ async def test_retries_exhausted_to_parking(harness_factory):
     assert notification.retry_count == 3
     assert notification.last_error is not None
 
-    # The terminally-failed message landed in the parking queue.
-    import asyncio
+    # The terminally-failed message landed in the parking queue — poll for it.
+    async def _parked():
+        return await h.queue_message_count(rabbit.PARKING_QUEUE) >= 1
 
-    await asyncio.sleep(0.3)
-    assert await h.queue_message_count(rabbit.PARKING_QUEUE) >= 1
+    await h.wait_until(_parked, timeout=20)
 
 
 # 8. History API ----------------------------------------------------------- #
@@ -282,3 +292,86 @@ async def test_history_api(harness_factory):
     assert item["id"] == nid
     assert item["status"] == "delivered"
     assert [e["status"] for e in item["history"]] == ["queued", "sent", "delivered"]
+
+
+# 9. Email channel happy path --------------------------------------------- #
+async def test_email_channel_delivered(harness_factory):
+    h = await harness_factory(mode="always_deliver")
+    resp = await _post(h.client, channel="email", message="hello mail", recipient_ids=["e1"])
+    nid = resp.json()["recipients"][0]["id"]
+
+    assert await h.wait_for_status(nid, {"delivered"}) == "delivered"
+
+    # The EMAIL provider was selected and called; the SMS provider was not.
+    email_calls = h.factory.for_channel("email").calls
+    assert len(email_calls) == 1
+    assert email_calls[0].notification_id == nid
+    assert email_calls[0].recipient == "e1"
+    assert h.factory.for_channel("sms").calls == []
+    assert await h.history(nid) == ["queued", "sent", "delivered"]
+
+
+# 10. Health endpoint ------------------------------------------------------ #
+async def test_health_ok(harness_factory):
+    h = await harness_factory(start_consumers=False)
+    resp = await h.client.get("/health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["components"]["database"]["ok"] is True
+    assert body["components"]["broker"]["ok"] is True
+    assert body["components"]["redis"]["ok"] is True
+
+
+# 11. Unknown notification id -> 404 -------------------------------------- #
+async def test_get_unknown_notification_404(harness_factory):
+    h = await harness_factory(start_consumers=False)
+    resp = await h.client.get(f"/api/v1/notifications/{uuid.uuid4()}")
+    assert resp.status_code == 404
+
+
+# 12. Rate limiter requeues (never drops) over the limit ------------------ #
+async def test_rate_limited_messages_are_requeued_not_dropped(harness_factory):
+    # SMS limit of 1/sec with 3 recipients: the dispatcher admits one per window
+    # and requeues the rest to the 5s tier. None are dropped — all three must
+    # still reach 'delivered', proving the rate-limit path requeues.
+    h = await harness_factory(mode="always_deliver", rate_limit_sms_per_sec=1)
+    resp = await _post(h.client, recipient_ids=["r1", "r2", "r3"])
+    ids = [r["id"] for r in resp.json()["recipients"]]
+
+    for nid in ids:
+        assert await h.wait_for_status(nid, {"delivered"}, timeout=20) == "delivered"
+    assert len(ids) == 3
+
+
+# 13. Reconciler redrives a stranded 'queued' row ------------------------- #
+async def test_sweeper_redrives_stuck_queued(harness_factory):
+    # Simulate the dual-write gap: rows are committed 'queued' but the work
+    # message was never published (crash between commit and publish). The
+    # reconciler must find and redrive them to delivery.
+    from notification_service.workers import sweeper
+
+    h = await harness_factory(mode="always_deliver")  # dispatcher + receipts live
+
+    async with session_scope() as session:
+        _, notifications = await repo.create_batch(
+            session,
+            channel="sms",
+            type_="transactional",
+            body="stranded",
+            idempotency_key=None,
+            recipient_ids=["stranded-1"],
+        )
+        await session.commit()
+        nid = str(notifications[0].id)
+
+    # No work message exists yet, so it stays 'queued'.
+    assert (await h.get_notification(nid)).status == "queued"
+
+    # One reconciliation pass (age threshold 0) must republish and drive it home.
+    counts = await sweeper.sweep_once(h.topology.exchange, queued_after_seconds=0)
+    assert counts["queued"] >= 1
+
+    assert await h.wait_for_status(nid, {"delivered"}, timeout=20) == "delivered"
+    calls = [c for c in h.factory.for_channel("sms").calls if c.notification_id == nid]
+    assert len(calls) == 1

@@ -66,6 +66,20 @@ class Settings(BaseSettings):
     # --- Idempotency ---
     idempotency_ttl_seconds: int = 86_400
 
+    # --- Request limits ---
+    # Maximum recipients accepted per POST /notifications (after de-duplication).
+    max_recipients: int = Field(default=1000, ge=1)
+
+    # --- Reconciler (sweeper) ---
+    # How often the reconciler runs, and how old a row must be before it is
+    # considered stuck. Thresholds must exceed normal processing + retry latency
+    # so live work is never redriven prematurely (the CAS gate makes a redundant
+    # redrive harmless either way).
+    sweeper_interval_seconds: int = Field(default=30, ge=1)
+    sweeper_queued_seconds: int = Field(default=60, ge=0)
+    sweeper_sent_seconds: int = Field(default=120, ge=0)
+    sweeper_batch_size: int = Field(default=100, ge=1)
+
     # --- Misc ---
     log_level: str = "INFO"
 

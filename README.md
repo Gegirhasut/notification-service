@@ -81,6 +81,20 @@ curl -s http://localhost:8000/api/v1/notifications/<id>
 curl -s http://localhost:8000/api/v1/subscribers/alice/notifications
 ```
 
+### Request validation
+
+`recipient_ids` are treated as **opaque identifiers** — no phone/email parsing,
+structural rules only. Invalid input → `422`.
+
+- **message**: trimmed; must be non-empty after trimming; max 1000 characters.
+- **recipient_ids**: 1…`MAX_RECIPIENTS` items (`MAX_RECIPIENTS` env, default 1000);
+  each entry trimmed, non-empty, max 128 characters; the list is **de-duplicated**
+  preserving first-seen order, and `total` reflects the unique count.
+- **channel** / **type**: must be one of the allowed values; a missing required
+  field is also `422`.
+- **Idempotency-Key** header (optional): if present, must be non-blank and ≤ 255
+  characters.
+
 ## Status model
 
 `queued → sent → delivered`, with `rejected` as the terminal failure state.
@@ -102,6 +116,7 @@ different command):
 | **api**       | FastAPI HTTP. Accepts requests, enforces idempotency, persists notifications as `queued`, publishes one message per recipient. **Never calls providers.** |
 | **dispatcher**| Consumes the priority work queue (`prefetch=1`), performs the atomic `queued → sent` compare-and-set, calls the provider mock, routes failures to retry/parking. |
 | **receipts**  | Consumes provider delivery receipts, performs `sent → delivered \| rejected`. |
+| **sweeper**   | Periodic reconciler (safety net): redrives rows stranded in `queued` (the commit→publish window) and re-resolves rows stuck in `sent` (a lost receipt). Idempotent — the CAS gate makes a redundant redrive a no-op. |
 
 ### Message flow
 
@@ -121,12 +136,13 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
 
 - Exchange `notifications` (direct).
 - `notifications.work` — `x-max-priority: 10`, routing key `work`, consumed with prefetch=1
-  (transactional published at priority 10, marketing at 1).
+  (transactional published at priority 10, marketing at 1); dead-letters to parking as a
+  backstop.
 - `notifications.dlx` — dead-letter exchange.
 - `notifications.retry.5s | .30s | .120s` — fixed `x-message-ttl`, dead-letter back to the
   work exchange.
 - `notifications.parking` — terminal dead messages, no consumer.
-- `notifications.receipts` — routing key `receipt`.
+- `notifications.receipts` — routing key `receipt`; dead-letters to parking as a backstop.
 
 ## Delivery semantics
 
@@ -134,10 +150,14 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
   Priority ordering only holds if the consumer's QoS prefetch is 1 — otherwise prefetch
   buffering defeats it. This is the mechanism by which transactional overtakes
   earlier-enqueued marketing.
-- **At-least-once (ack after commit).** Manual acks everywhere; the dispatcher acks only
-  **after** the DB transaction commits. On handler exception it `nack(requeue=False)` and
-  republishes to the appropriate retry tier — never silently dropping, never acking before
-  the state change is durable, so the guarantee survives crashes.
+- **At-least-once (ack after commit).** Manual acks everywhere; a consumer acks only
+  **after** the handler's DB transaction commits. Nothing is ever silently discarded: an
+  *undecodable/poison* message is dead-lettered to `notifications.parking`; an *unexpected
+  runtime fault* (a DB/broker blip) is treated as transient and re-driven — the dispatcher
+  republishes it through the retry tiers (→ parking + `rejected` once `MAX_RETRIES` is
+  exhausted) and the receipts consumer requeues it. Both the work and receipts queues carry a
+  dead-letter route to parking as the backstop, so a `nack(requeue=False)` always lands in
+  parking, never in the void.
 - **Business exactly-once (CAS gate + provider idempotency key).** Before calling the
   provider, the dispatcher runs, inside a transaction,
   `UPDATE notifications SET status='sent', sent_at=now() WHERE id=:id AND status='queued'`.
@@ -157,6 +177,39 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
   transaction, a notification that succeeds on its second attempt audits as
   `queued → sent → queued → sent → delivered`. The flap is intentional, not a bug — the
   retry `queued` event carries a detail like `retry 1: gateway temporarily unavailable`.
+
+## Known limitations & production hardening
+
+Honest notes on where this take-home stops short of a production deployment, and
+how each gap is mitigated here:
+
+- **The DB-commit → publish step is a non-atomic dual-write.** The API commits the
+  `queued` rows and *then* publishes one work message per recipient. A crash (or a
+  broker outage) in that window strands rows in `queued`. **Mitigation:** the
+  **sweeper** reconciler redrives stale `queued` rows. The full production answer
+  is a **transactional outbox + relay** (write the intent to an `outbox` table in
+  the same transaction, publish from there), which this design deliberately omits
+  for scope.
+- **Delivery receipts are emitted in-process by the provider mock.** In production
+  a receipt arrives from the gateway via **webhook**, independent of our process
+  lifecycle; if our dispatcher dies after marking `sent` but before the mock's
+  in-memory receipt task fires, that receipt is lost. **Mitigation:** the sweeper
+  re-resolves rows stuck in `sent` (it re-drives them; the idempotent provider key
+  re-emits the receipt).
+- **Publisher confirms** *are* on: aio-pika opens channels with
+  `publisher_confirms=True`, so every `await exchange.publish(...)` waits for the
+  broker to acknowledge the message. No change was needed here.
+- **The `/health` broker check is shallow** — it reports the AMQP connection's
+  `is_closed` flag, not a round-trip probe, so a mid-reconnect broker can briefly
+  read healthy.
+- **The rate limiter rebounds indefinitely under sustained over-limit, by design.**
+  Over-limit sends are requeued to the 5s retry tier rather than dropped or
+  counted against `max_retries`, so a persistent overload keeps messages cycling
+  (never lost) until capacity frees up.
+- **Topology change note:** the work and receipts queues now declare a dead-letter
+  route to parking. Because that changes existing queue arguments, an *already
+  running* dev broker must be reset once — `docker compose down -v` — before the
+  next `up`. A fresh stack and the ephemeral test infra are unaffected.
 
 ## Testing
 

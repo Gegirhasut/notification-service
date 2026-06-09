@@ -75,7 +75,9 @@ class Notification(Base):
     batch_id: Mapped[uuid.UUID] = _uuid_col(
         ForeignKey("batches.id", ondelete="CASCADE"), nullable=False
     )
-    subscriber_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    # No standalone index: the composite (subscriber_id, created_at) below covers
+    # subscriber_id-prefixed lookups, so a single-column index would be redundant.
+    subscriber_id: Mapped[str] = mapped_column(String(255), nullable=False)
     channel: Mapped[str] = mapped_column(String(16), nullable=False)
     type: Mapped[str] = mapped_column(String(16), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
