@@ -143,6 +143,9 @@ for simplicity and reconcile the crash window instead.
 
 ## Architecture
 
+For a verified, module-by-module deep dive (directory map, request lifecycle, broker topology,
+requirement→implementation map, reliability internals), see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 One codebase, one image, three app processes (separate compose services, same image,
 different command):
 
