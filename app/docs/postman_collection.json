@@ -1,0 +1,120 @@
+{
+  "info": {
+    "name": "Notification Service",
+    "description": "Mass SMS/Email dispatch microservice. Set the `base_url` collection variable (default http://localhost:8000).",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8000" },
+    { "key": "batch_id", "value": "" },
+    { "key": "notification_id", "value": "" },
+    { "key": "subscriber_id", "value": "alice" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+      }
+    },
+    {
+      "name": "Create notifications (transactional SMS)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('batch_id', body.batch_id);",
+              "if (body.recipients && body.recipients.length) {",
+              "  pm.collectionVariables.set('notification_id', body.recipients[0].id);",
+              "  pm.collectionVariables.set('subscriber_id', body.recipients[0].subscriber_id);",
+              "}",
+              "pm.test('202 Accepted', () => pm.expect(pm.response.code).to.eql(202));"
+            ],
+            "type": "text/javascript"
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "demo-key-001" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"Your code is 4821\",\n  \"recipient_ids\": [\"alice\", \"bob\", \"carol\"]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/notifications",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "notifications"]
+        }
+      }
+    },
+    {
+      "name": "Create notifications (duplicate key -> 200)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "demo-key-001" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"sms\",\n  \"type\": \"transactional\",\n  \"message\": \"Your code is 4821\",\n  \"recipient_ids\": [\"alice\", \"bob\", \"carol\"]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/notifications",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "notifications"]
+        }
+      }
+    },
+    {
+      "name": "Create notifications (marketing email)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"channel\": \"email\",\n  \"type\": \"marketing\",\n  \"message\": \"Summer sale is live!\",\n  \"recipient_ids\": [\"alice\", \"dave\"]\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/notifications",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "notifications"]
+        }
+      }
+    },
+    {
+      "name": "Get notification by id",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/v1/notifications/{{notification_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "notifications", "{{notification_id}}"]
+        }
+      }
+    },
+    {
+      "name": "List subscriber notifications (history)",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{base_url}}/api/v1/subscribers/{{subscriber_id}}/notifications?limit=50&offset=0",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "subscribers", "{{subscriber_id}}", "notifications"],
+          "query": [
+            { "key": "status", "value": "delivered", "disabled": true },
+            { "key": "limit", "value": "50" },
+            { "key": "offset", "value": "0" }
+          ]
+        }
+      }
+    }
+  ]
+}

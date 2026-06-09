@@ -1,0 +1,139 @@
+name: notification-service
+
+x-app-env: &app-env
+  POSTGRES_USER: ${POSTGRES_USER:-notify}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-notify}
+  POSTGRES_DB: ${POSTGRES_DB:-notifications}
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: 5432
+  RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-notify}
+  RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-notify}
+  RABBITMQ_HOST: rabbitmq
+  RABBITMQ_PORT: 5672
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  REDIS_DB: 0
+  PROVIDER_MODE: ${PROVIDER_MODE:-random}
+  PROVIDER_RECEIPT_DELAY: ${PROVIDER_RECEIPT_DELAY:-0.2}
+  MAX_RETRIES: ${MAX_RETRIES:-3}
+  RATE_LIMIT_SMS_PER_SEC: ${RATE_LIMIT_SMS_PER_SEC:-50}
+  RATE_LIMIT_EMAIL_PER_SEC: ${RATE_LIMIT_EMAIL_PER_SEC:-100}
+  IDEMPOTENCY_TTL_SECONDS: ${IDEMPOTENCY_TTL_SECONDS:-86400}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-app-build: &app-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-notify}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-notify}
+      POSTGRES_DB: ${POSTGRES_DB:-notifications}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-notify} -d ${POSTGRES_DB:-notifications}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Infra is reached over the compose network; host ports are not published by
+    # default to avoid clashing with anything already running on the host.
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-notify}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-notify}
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+    ports:
+      # Only the management UI is published (handy for inspecting queues).
+      - "${RABBITMQ_MGMT_PUBLISH_PORT:-15672}:15672"
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: run migrations to head, then exit 0.
+  migrate:
+    <<: *app-build
+    image: notification-service:latest
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *app-build
+    image: notification-service:latest
+    command:
+      ["uvicorn", "notification_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    ports:
+      - "${API_PUBLISH_PORT:-8000}:8000"
+
+  dispatcher:
+    <<: *app-build
+    image: notification-service:latest
+    command: ["python", "-m", "notification_service.workers.dispatcher"]
+    environment:
+      <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  receipts:
+    <<: *app-build
+    image: notification-service:latest
+    command: ["python", "-m", "notification_service.workers.receipts"]
+    environment:
+      <<: *app-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  rabbitmqdata:
+  redisdata:
