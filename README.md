@@ -162,17 +162,32 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
 
 Integration tests run against **real** Postgres/RabbitMQ/Redis via **testcontainers** (only
 the provider is mocked, in a deterministic mode), plus unit tests for the CAS transition and
-the idempotency service. Only Docker is required on the host:
+the idempotency service.
+
+**Prerequisite: Docker only.** No host Python or virtualenv is needed — the suite runs
+inside the Dockerfile's `test` stage, whose venv lives at `/opt/venv` inside the image, so
+the vboxsf/shared-folder symlink problem never arises.
+
+Run the full suite (the image's default CMD is `pytest -q`):
 
 ```bash
 cd app
-./scripts/run-tests.sh           # builds a test image, runs the suite in a container
+./scripts/run-tests.sh
 ```
 
-The runner mounts the host Docker socket so testcontainers can spawn ephemeral infra on
-random ports (reached via the host gateway) — nothing is installed on the host beyond
-Docker, and the test infra never collides with the compose stack. Pass through pytest args,
-e.g. `./scripts/run-tests.sh -k priority`.
+Any arguments you pass **replace** the image CMD, so include the literal `pytest` before any
+flags:
+
+```bash
+./scripts/run-tests.sh pytest -v
+./scripts/run-tests.sh pytest -v tests/integration/test_flows.py
+./scripts/run-tests.sh pytest -v -k idempotency
+```
+
+Mechanics: the runner mounts the host Docker socket, so testcontainers drives the host
+Docker to spawn ephemeral Postgres/RabbitMQ/Redis on random ports, reached via
+`host.docker.internal` — the test infra never clashes with anything already on the host
+(e.g. a host Redis on 6379). Only the provider is mocked.
 
 Coverage (each asserts DB state + provider calls): bulk accept, full happy chain, rejected
 path, priority overtaking, two-layer idempotency, exactly-once under redelivery and under a
