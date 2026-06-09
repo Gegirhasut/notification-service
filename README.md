@@ -27,17 +27,29 @@ legacy `docker-compose` v1 binary). Nothing else is installed on the host.
 ./app/scripts/bootstrap.sh
 
 # Bring up the whole stack (api, dispatcher, receipts, sweeper, Postgres, RabbitMQ, Redis, migrate)
-# straight from the repo root — no `cd` needed.
+# straight from the repo root — no `cd` needed. Requires Docker Compose v2.20+ (for `include:`).
 docker compose up --build
+
+# Fallback for older Docker Compose v2 (< v2.20, no `include:` support): run from app/ instead.
+cd app && docker compose up --build
 ```
 
-The repo-root `docker-compose.yml` is a thin `include:` of [`app/docker-compose.yml`](app/docker-compose.yml)
-(Compose **v2.20+**), so the one command works from the root with no duplicated service definitions.
-Everything else (source, Dockerfile, migrations, tests) lives under `app/`; if you prefer, you can
-also `cd app && docker compose up --build`.
+The repo-root command needs **Docker Compose v2.20+**, because the repo-root
+`docker-compose.yml` is a thin `include:` of [`app/docker-compose.yml`](app/docker-compose.yml)
+(`include:` landed in v2.20), so the one command works from the root with no duplicated service
+definitions. On an **older v2** (without `include:`) the fallback is `cd app && docker compose up --build`
+— same stack, run from `app/`. Everything else (source, Dockerfile, migrations, tests) lives under `app/`.
 
 A `.env` is optional — compose has sane local-dev defaults baked in (copy `.env.example`
-to `.env` to override). Only **two host ports are published**:
+to `.env` to override).
+
+> **Provider mode for a live demo.** `PROVIDER_MODE` defaults to **`always_deliver`**, so a
+> manual `POST` shows a clean `queued → sent → delivered` chain with no random rejects or
+> retries. To watch the **retry** and **rejected** paths live, set
+> `PROVIDER_MODE=transient_then_deliver` or `PROVIDER_MODE=random`. Those paths are also
+> covered deterministically by the integration tests (each test forces its own mode).
+
+Only **two host ports are published**:
 
 - **8000** — the API (and Swagger UI)
 - **15672** — the RabbitMQ management UI
