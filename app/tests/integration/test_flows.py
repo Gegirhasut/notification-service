@@ -119,6 +119,42 @@ async def test_priority_transactional_overtakes_marketing(harness_factory):
     assert calls[0].notification_id == txn_id
 
 
+# 4b. Priority under a marketing backlog ----------------------------------- #
+async def test_priority_transactional_overtakes_marketing_backlog(harness_factory):
+    # A heavier, deterministic version of the priority test: prove a single
+    # transactional message overtakes a *backlog* of low-priority marketing
+    # already sitting in the queue, even though it is enqueued last.
+    #
+    # Determinism: always_deliver has no transient failures, so retry/backoff
+    # cannot reorder dispatch; consumers stay stopped until everything is
+    # enqueued, so a live consumer can't grab whatever arrives first.
+    h = await harness_factory(mode="always_deliver", start_consumers=False)
+
+    backlog = [f"m{i}" for i in range(50)]
+    mkt = await _post(h.client, type_="marketing", recipient_ids=backlog)
+    assert mkt.status_code == 202
+
+    # The single transactional message is enqueued LAST, behind all 50.
+    txn = await _post(h.client, type_="transactional", recipient_ids=["vip"])
+    assert txn.status_code == 202
+    txn_id = txn.json()["recipients"][0]["id"]
+
+    # Only now start the dispatcher (prefetch=1, same as production) and drain.
+    await h.start_consumers()
+    await h.wait_for_status(txn_id, {"delivered"})
+
+    calls = h.factory.for_channel("sms").calls
+    # Despite being enqueued last, the priority-10 transactional message is the
+    # very first send() call — it overtook the entire marketing backlog.
+    assert calls[0].notification_id == txn_id
+
+    # And the whole batch eventually drains to delivered.
+    mkt_ids = [r["id"] for r in mkt.json()["recipients"]]
+    for nid in mkt_ids:
+        await h.wait_for_status(nid, {"delivered"})
+    assert len(mkt_ids) == 50
+
+
 # 5. Idempotency ----------------------------------------------------------- #
 async def test_idempotency_same_key_returns_original(harness_factory):
     h = await harness_factory(start_consumers=False)
