@@ -113,6 +113,29 @@ structural rules only. Invalid input → `422`.
 - **Idempotency-Key** header (optional): if present, must be non-blank and ≤ 255
   characters.
 
+### Provider simulation modes
+
+The external SMS/Email gateway is **mocked** — no real provider is contacted. Its behaviour
+is driven by the **`PROVIDER_MODE`** env var, which lets you demonstrate each delivery path
+on demand:
+
+| `PROVIDER_MODE` | Demonstrates |
+|---|---|
+| `always_deliver` *(default)* | Clean `queued → sent → delivered`. |
+| `always_reject` | Terminal `rejected` with `last_error` set. |
+| `transient_then_deliver` | A transient failure, then retry → `delivered` (shows retry/backoff). |
+| `random` | A realistic mix — most `delivered`, some `rejected`, some transient → retry. |
+
+Set it via the `PROVIDER_MODE` env var — e.g. in `app/.env`, or inline for one run:
+
+```bash
+PROVIDER_MODE=random docker compose up -d
+```
+
+The shipped default is **`always_deliver`** so the very first run shows a clean chain with no
+random rejects or retries. All four paths are also covered **deterministically** by the
+integration tests (each test forces its own mode).
+
 ## Status model
 
 `queued → sent → delivered`, with `rejected` as the terminal failure state.
