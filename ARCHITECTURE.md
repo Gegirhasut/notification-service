@@ -193,7 +193,7 @@ All exchanges/queues are durable; all messages are published with `delivery_mode
 |---|---|
 | **Priority (transactional overtakes marketing)** | Single `x-max-priority: 10` work queue (`rabbit.declare_topology`); priorities set in `publisher.priority_for_type` from `PRIORITY_TRANSACTIONAL=10` / `PRIORITY_MARKETING=1` (`db/models.py`); dispatcher consumes with `prefetch=1` (`consumer.consume(..., prefetch=1)` called by `dispatcher.run`). |
 | **At-least-once** | Manual acks only, after the DB commit (`consumer.consume`); handler faults go through `dispatcher.make_failure_policy` / `receipts.make_failure_policy` which re-drive or park — never silent-drop. |
-| **Business exactly-once** | `services/status.cas_queued_to_sent` — `UPDATE ... WHERE status='queued'`; only `rowcount==1` proceeds to the provider. Provider-key idempotency backstop in `providers/base.BaseMockProvider.send` (keyed on `notification_id`). |
+| **Duplicate suppression within the mock process lifetime** | `services/status.cas_queued_to_sent` — `UPDATE ... WHERE status='queued'`; only `rowcount==1` proceeds to the provider. Provider-key idempotency backstop in `providers/base.BaseMockProvider.send` (keyed on `notification_id`). |
 | **Retry with backoff** | Fixed-TTL tiers `retry.5s/.30s/.120s` (`rabbit.declare_topology`); `dispatcher._tier_for_attempt` selects the tier; `publisher.publish_retry`; `status.revert_sent_to_queued_for_retry` bumps `retry_count`; exhausted at `MAX_RETRIES` → parking. |
 | **Request idempotency (two layers)** | Layer 1 Redis `SETNX` (`services/idempotency.claim`); Layer 2 `UNIQUE(idempotency_key)` on `batches` (`db/models.Batch`), `IntegrityError` resolved in `services/notification_service.create_and_dispatch`. |
 | **Persistence / durability** | Durable exchanges + queues, persistent messages (`rabbit.declare_topology`, `publisher._message` with `DeliveryMode.PERSISTENT`); Postgres rows are the source of truth; topology re-declared idempotently on every boot. |
@@ -204,7 +204,16 @@ All exchanges/queues are durable; all messages are published with `delivery_mode
 
 ## 6. Reliability internals
 
-- **CAS gate** — `status.cas_queued_to_sent` is the business exactly-once mechanism: a conditional
+**Guarantee boundary:** a compare-and-set claim prevents competing callers from
+dispatching the same currently queued row. Retries and the sweeper can return that
+row to `queued`, permitting another claim. The provider mock deduplicates by
+`notification_id` only in process memory: it loses that cache on restart and does
+not share it across workers. Durable end-to-end duplicate prevention requires an
+external provider with persistent idempotency. This is a reference implementation
+with simulated delivery, not a claim of universal exactly-once messaging.
+
+
+- **CAS gate** — `status.cas_queued_to_sent` serializes a dispatch claim with a conditional
   `UPDATE ... WHERE id=:id AND status='queued'`. Only the winner (`rowcount==1`) calls the
   provider; losers (redeliveries) observe `status != 'queued'` in `dispatcher.handle` and ack-skip.
 - **Ack-after-commit** — `broker/consumer.consume` acks only when the handler returns normally,
@@ -246,7 +255,7 @@ failure state.
   (`status.revert_sent_to_queued_for_retry`). Initial creation writes a `queued` event with detail
   `created`.
 - **sent** — set by the CAS claim (`status.cas_queued_to_sent`). `sent` denotes "this dispatcher
-  won the right to call the provider"; it is the exactly-once claim, not yet delivery confirmation.
+  won the right to call the provider"; it records the dispatch claim, not delivery confirmation.
 - **delivered** — set by `status.mark_delivered` (CAS from `sent`) when a `delivered` receipt is
   applied.
 - **rejected** — set by `status.mark_rejected` from a `rejected` receipt (`sent → rejected`) or by
