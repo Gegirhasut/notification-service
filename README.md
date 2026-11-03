@@ -1,13 +1,21 @@
 # Notification Service
 
-A containerized microservice for **mass SMS/Email dispatch** with priority routing, durable
-queues, retry-with-backoff, two-layer request idempotency, and business-level
-**exactly-once** delivery with full delivery-status tracking. Clients submit a batch of
-recipients; the service persists each notification as `queued`, fans one message per
-recipient onto a priority work queue, and drives it through `queued → sent → delivered`
-(or terminal `rejected`) while auditing every transition. Transactional traffic overtakes
-marketing traffic, redeliveries never double-send, and the whole stack comes up with a
-single `docker compose up --build`.
+A containerized **SMS/email dispatch reference service** built to explore reliable
+asynchronous processing: priority queues, durable state, bounded retries, request
+idempotency and an auditable delivery lifecycle. The SMS/email providers are simulated;
+this repository does not demonstrate a deployed commercial messaging service.
+
+Clients submit recipient batches. FastAPI persists notifications in PostgreSQL,
+RabbitMQ distributes work, and separate dispatcher, receipt and sweeper processes
+drive `queued → sent → delivered` (or `rejected`). Redis accelerates request
+deduplication and rate limiting. Transactional messages take priority over marketing.
+
+The engineering focus is recovery and explicit delivery semantics: database constraints
+back request idempotency, compare-and-set claims suppress competing dispatches, and
+the sweeper recovers stranded work. End-to-end duplicate prevention also depends on
+provider-side idempotency; the included mock keeps that state only in memory.
+See [delivery semantics](#delivery-semantics) and [production limitations](#known-limitations--production-hardening).
+Start the complete local stack with `docker compose up --build`.
 
 ## Tech stack
 
@@ -150,8 +158,9 @@ integration tests (each test forces its own mode).
 **Precise meaning of `sent`.** `sent` is set the moment the dispatcher *claims* the
 notification via the compare-and-set gate (`UPDATE … SET status='sent' WHERE … status='queued'`),
 and it transmits to the provider immediately afterwards. The CAS-before-transmit ordering is
-deliberate: it is what makes the provider call **at-most-once** (only the single caller that flips
-the row may call the gateway). The trade-off is a narrow window where a row reads `sent` before — or
+deliberate: only the caller that wins this claim may call the gateway. A retry or sweeper
+redrive can create a later claim, so this is not lifetime at-most-once delivery.
+The trade-off is a narrow window where a row reads `sent` before — or
 without — a successful transmit:
 
 - A **transient** provider failure reverts `sent → queued` and retries (the intentional flap below).
@@ -224,7 +233,7 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
 
   Both the work and receipts queues carry a dead-letter route to parking as the backstop, so a
   `nack(requeue=False)` always lands in parking, never in the void.
-- **Business exactly-once (CAS gate + provider idempotency key).** Before calling the
+- **Duplicate suppression (CAS gate + provider idempotency key).** Before calling the
   provider, the dispatcher runs, inside a transaction,
   `UPDATE notifications SET status='sent', sent_at=now() WHERE id=:id AND status='queued'`.
   Only the caller whose update flips exactly one row proceeds; redeliveries observe
@@ -233,9 +242,9 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
   idempotency key — the provider mock deduplicates on it and emits at most one effective
   delivery per id, across any retries or concurrent duplicates.
 
-  > **⚠️ Single-dispatcher guarantee.** Business exactly-once as implemented holds for **one
-  > dispatcher process**, which is how the stack is deployed (the `dispatcher` compose service
-  > is single-instance — no `deploy.replicas`). The CAS gate is globally correct (Postgres
+  > **Mock deduplication scope.** Deduplication is limited to **one live dispatcher
+  > process**, which is how the demo stack runs. Its cache does not survive a restart;
+  > a subsequent redrive can accept the same notification again. The CAS gate is globally correct (Postgres
   > serialises the row update), but the *mid-retry* backstop — the dedup that covers the window
   > where a row is briefly back in `queued` — lives in the provider mock's **in-process memory**.
   > Run two or more dispatchers and that window is no longer covered: two processes could each
@@ -247,7 +256,7 @@ Declared idempotently on startup; durable exchanges/queues, persistent messages
   `MAX_RETRIES` (default 3) the message goes to `notifications.parking` and the row becomes
   `rejected` with `last_error`. No delayed-message plugin is used.
 - **Deliberate `queued → sent → queued` flap.** The CAS flips `queued → sent` *before* the
-  provider call (that ordering is what makes exactly-once hold). On a transient provider
+  provider call (that ordering serializes each claim). On a transient provider
   failure the row is genuinely reverted `sent → queued`, the retry counter bumps, and the
   message is republished. Since every change writes a `status_events` row in the same
   transaction, a notification that succeeds on its second attempt audits as
@@ -281,8 +290,8 @@ how each gap is mitigated here:
   must be tuned above the gateway's worst-case acceptance latency (and the provider call
   made idempotent) before this is production-safe.
 - **Horizontal scaling of the dispatcher** is **not** supported as written — business
-  exactly-once depends on a single dispatcher process for the mid-retry window (see the
-  ⚠️ note under *Delivery semantics → Business exactly-once*). Scaling out requires a real
+  duplicate suppression depends on one live dispatcher and its in-memory cache (see
+  *Delivery semantics → Duplicate suppression*). Restarts and scaling out require a real
   provider-side idempotency key.
 - **Publisher confirms** *are* on: aio-pika opens channels with
   `publisher_confirms=True`, so every `await exchange.publish(...)` waits for the
